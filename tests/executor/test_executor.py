@@ -26,7 +26,8 @@ ORG = "test-org-uuid"
 
 def _run(state: dict, *, token="test-token", org=ORG, extra_env=None) -> dict:
     """Write state to a temp state.json, run the executor against the mock, return new state."""
-    httpd, _ = make_server()
+    httpd, mock = make_server()
+    _run.mock = mock  # expose captured deploy env etc. to key-passing tests
     port = httpd.server_address[1]
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
@@ -42,6 +43,7 @@ def _run(state: dict, *, token="test-token", org=ORG, extra_env=None) -> dict:
                 "AMP_POLL_SLEEP": "0",
                 "AMP_POLL_TRIES": "3",
             }
+            env.pop("ANTHROPIC_API_KEY", None)  # deterministic: only a test may set it
             if token is not None:
                 env["CREWAI_TOKEN"] = token
             if org is not None:
@@ -81,7 +83,7 @@ def test_provision_single_comes_online():
     d = _dep("pharma/your-own-data", out)
     assert d["status"] == "Online"
     assert d["name"] == "showcase_pharma_your_own_data"
-    assert d["public_url"].startswith("https://")
+    assert d["public_url"].startswith("http")  # mock serves http://…/pub/{uuid}
     print("ok: provision single -> Online")
 
 
@@ -137,6 +139,44 @@ def test_create_failure_marks_failed():
     assert _cmd_state(out) == "error"
     assert _dep("pharma/boom", out)["status"] == "Failed"
     print("ok: create failure -> command error + deployment Failed")
+
+
+def test_kickoff_runs_end_to_end():
+    out = _run(_state([_cmd("provision", "pharma/your-own-data", "c1"),
+                       _cmd("kickoff", "pharma/your-own-data", "c2")]))
+    assert _cmd_state(out, "c2") == "done"
+    d = _dep("pharma/your-own-data", out)
+    assert d["last_run"]["state"] == "SUCCESS"
+    assert d["last_run"]["result"]  # non-empty run output recorded
+    assert d["last_run"]["kickoff_id"].startswith("kickoff-")
+    print("ok: kickoff runs end-to-end -> last_run SUCCESS with output")
+
+
+def test_kickoff_failed_run_marks_error():
+    out = _run(_state([_cmd("provision", "pharma/flopkick", "c1"),
+                       _cmd("kickoff", "pharma/flopkick", "c2")]))
+    assert _cmd_state(out, "c2") == "error"
+    assert _dep("pharma/flopkick", out)["last_run"]["state"] == "FAILED"
+    print("ok: failed run -> command error + last_run FAILED")
+
+
+def test_kickoff_on_absent_deployment_errors():
+    out = _run(_state([_cmd("kickoff", "pharma/your-own-data")]))
+    assert _cmd_state(out) == "error"
+    print("ok: kickoff a non-deployed scenario -> command error")
+
+
+def test_provision_passes_anthropic_key_when_set():
+    _run(_state([_cmd("provision", "pharma/your-own-data")]),
+         extra_env={"ANTHROPIC_API_KEY": "sk-test-123"})
+    assert _run.mock.last_env == {"ANTHROPIC_API_KEY": "sk-test-123"}, _run.mock.last_env
+    print("ok: ANTHROPIC_API_KEY forwarded into deploy env when set")
+
+
+def test_provision_sends_empty_env_without_key():
+    _run(_state([_cmd("provision", "pharma/your-own-data")]))  # no ANTHROPIC_API_KEY
+    assert _run.mock.last_env == {}, _run.mock.last_env
+    print("ok: no key set -> deploy env is empty (no leakage)")
 
 
 def test_failed_status_during_poll_marks_failed():

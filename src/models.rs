@@ -46,6 +46,23 @@ pub struct Deployment {
     pub public_url: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// The most recent kickoff/run outcome, written by the executor. None until
+    /// the scenario has been run at least once.
+    #[serde(default)]
+    pub last_run: Option<LastRun>,
+}
+
+/// The outcome of the most recent kickoff (a real run), recorded by the executor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LastRun {
+    pub kickoff_id: String,
+    /// "SUCCESS" | "FAILED" | "RUNNING" | "ERROR"
+    pub state: String,
+    /// The run's output (JSON, serialized to a string), or None.
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub ran_at: Option<String>,
 }
 
 impl Deployment {
@@ -60,7 +77,7 @@ impl Deployment {
 pub struct Command {
     /// uuid v4.
     pub id: String,
-    /// "provision" | "reset" | "teardown"
+    /// "provision" | "reset" | "teardown" | "kickoff"
     pub action: String,
     /// "<sector>/<slug>" for a single scenario, or None for all.
     #[serde(default)]
@@ -93,6 +110,7 @@ mod tests {
             status: "Online".into(),
             public_url: None,
             updated_at: None,
+            last_run: None,
         };
         assert_eq!(d.scenario(), "financial-services/test-drive");
     }
@@ -107,6 +125,7 @@ mod tests {
             status: "Online".into(),
             public_url: Some("https://x.crewai.com".into()),
             updated_at: Some("2026-07-06T00:00:00Z".into()),
+            last_run: None,
         });
         let json = serde_json::to_string(&s).unwrap();
         let back: ConsoleState = serde_json::from_str(&json).unwrap();
@@ -145,5 +164,24 @@ mod tests {
         assert_eq!(s.deployments[0].status, "Online");
         assert_eq!(s.commands[0].state, "done");
         assert_eq!(s.commands[0].scenario.as_deref(), Some("pharma/payload"));
+    }
+
+    #[wasm_bindgen_test]
+    fn parses_a_deployment_with_a_last_run() {
+        // A kickoff command's result: the executor records last_run on the
+        // deployment. Deployments without last_run must still parse (default).
+        let json = r#"{
+          "schema_version": 1,
+          "deployments": [
+            {"sector":"pharma","slug":"your-own-data","name":"showcase_pharma_your_own_data",
+             "status":"Online",
+             "last_run":{"kickoff_id":"k-1","state":"SUCCESS","result":"{\"ok\":true}","ran_at":"t"}}
+          ]
+        }"#;
+        let s: ConsoleState = serde_json::from_str(json).unwrap();
+        let lr = s.deployments[0].last_run.as_ref().unwrap();
+        assert_eq!(lr.state, "SUCCESS");
+        assert_eq!(lr.kickoff_id, "k-1");
+        assert!(lr.result.as_deref().unwrap().contains("ok"));
     }
 }

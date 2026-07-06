@@ -147,6 +147,9 @@ fn cmd_state_class(state: &str) -> &'static str {
 /// deployment status(es) and append the command. The executor Action later
 /// overwrites these with real results.
 fn apply_command(cs: &mut ConsoleState, cmd: &Command) {
+    // "kickoff" runs an already-Online deployment — it doesn't change the
+    // deployment's status (the executor records the run under `last_run`), so it
+    // maps to None here, same as an unknown action.
     let target_status: Option<&str> = match cmd.action.as_str() {
         "teardown" => Some("Not deployed"),
         "provision" | "reset" => Some("Provisioning"),
@@ -606,6 +609,28 @@ fn DashboardView() -> impl IntoView {
 fn deployment_row(state: AppState, d: Deployment) -> impl IntoView {
     let scenario = d.scenario();
     let not_deployed = d.status == "Not deployed";
+    let is_online = d.status == "Online";
+
+    // Compact "last run" indicator under the status, populated once a scenario
+    // has been kicked off (the executor writes `last_run`).
+    let run_cell = match d.last_run.clone() {
+        Some(lr) => {
+            let cls = match lr.state.as_str() {
+                "SUCCESS" => "badge badge-green",
+                "FAILED" | "ERROR" => "badge badge-red",
+                _ => "badge badge-amber",
+            };
+            let title = lr.result.clone().unwrap_or_default();
+            view! {
+                <div class="run-line" title=title>
+                    <span class="muted">"run: "</span>
+                    <span class=cls>{lr.state}</span>
+                </div>
+            }
+            .into_any()
+        }
+        None => ().into_any(),
+    };
 
     let url_cell = match d.public_url.clone() {
         Some(url) if !url.is_empty() => {
@@ -625,6 +650,7 @@ fn deployment_row(state: AppState, d: Deployment) -> impl IntoView {
     let sc_provision = scenario.clone();
     let sc_reset = scenario.clone();
     let sc_teardown = scenario.clone();
+    let sc_run = scenario.clone();
 
     view! {
         <tr>
@@ -632,6 +658,7 @@ fn deployment_row(state: AppState, d: Deployment) -> impl IntoView {
             <td>{d.name.clone()}</td>
             <td>
                 <span class=status_class(&d.status)>{d.status.clone()}</span>
+                {run_cell}
             </td>
             <td>{url_cell}</td>
             <td class="muted">{updated}</td>
@@ -648,6 +675,22 @@ fn deployment_row(state: AppState, d: Deployment) -> impl IntoView {
                                     }
                                 >
                                     "Provision"
+                                </button>
+                            }
+                                .into_any()
+                        } else {
+                            ().into_any()
+                        }
+                    }}
+                    {move || {
+                        if is_online {
+                            let sc = sc_run.clone();
+                            view! {
+                                <button
+                                    class="btn btn-xs btn-accent"
+                                    on:click=move |_| enqueue_command(state, "kickoff", Some(sc.clone()))
+                                >
+                                    "Run"
                                 </button>
                             }
                                 .into_any()
@@ -687,6 +730,7 @@ mod tests {
             status: status.into(),
             public_url: None,
             updated_at: None,
+            last_run: None,
         }
     }
 
@@ -725,6 +769,18 @@ mod tests {
         cs.deployments = vec![dep("pharma", "payload", "Online"), dep("finserv", "test-drive", "Failed")];
         apply_command(&mut cs, &cmd("provision", None));
         assert!(cs.deployments.iter().all(|d| d.status == "Provisioning"));
+    }
+
+    #[wasm_bindgen_test]
+    fn kickoff_appends_command_without_changing_status() {
+        // A run doesn't change the deployment's status (it stays Online); the
+        // executor records the outcome separately under last_run.
+        let mut cs = ConsoleState::initial("org");
+        cs.deployments = vec![dep("pharma", "your-own-data", "Online")];
+        apply_command(&mut cs, &cmd("kickoff", Some("pharma/your-own-data")));
+        assert_eq!(cs.deployments[0].status, "Online"); // unchanged
+        assert_eq!(cs.commands.len(), 1);
+        assert_eq!(cs.commands[0].action, "kickoff");
     }
 
     #[wasm_bindgen_test]
