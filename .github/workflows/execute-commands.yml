@@ -3,13 +3,20 @@ name: execute-commands
 # Executor for the amp-showcase web UI (the browser dashboard).
 #
 # The browser console never calls the AMP API directly (CORS + secret safety).
-# Instead it enqueues Command objects into state.json (state="pending"). This
-# workflow drains that queue: for each pending command it runs the matching AMP
-# action, then writes results back into state.json (deployment status + command
-# state="done"), and commits the file.
+# It enqueues Command objects into state.json (state="pending"). This workflow
+# runs amp-executor.sh, which drains that queue: for each pending command it
+# runs the matching AMP control-plane action (self-contained curl — no clone of
+# the private amp-showcase repo), writes results back into state.json
+# (deployment status + public_url, command state), and this job commits the file.
 #
-# Runs on a ~5 min schedule and on manual dispatch. Concurrency guard prevents
-# two runs from racing on state.json.
+# WHERE THIS RUNS: this file, together with amp-executor.sh, lives in *each
+# FDE's own private state repo* (see docs/walkthroughs/05-onboard-a-new-fde.md
+# for how to install it — "Use this template" or a one-line gh command). It
+# reads that repo's state.json and that repo's secrets. The canonical copy lives
+# in tbaums/amp-showcase-web-ui; state repos install a copy.
+#
+# Runs on a ~5-minute schedule and on manual dispatch. The concurrency guard
+# stops two runs from racing on state.json.
 
 on:
   workflow_dispatch:
@@ -32,111 +39,18 @@ jobs:
 
       - name: Drain pending commands
         env:
-          # Configure these as repo secrets (Settings → Secrets and variables → Actions).
+          # Repo secrets (Settings → Secrets and variables → Actions).
+          # CREWAI_TOKEN: the AMP Settings → Account bearer token (~60-day TTL).
+          # SHOWCASE_ORG: your AMP org UUID.
+          # ANTHROPIC_API_KEY (optional): passed to deployed crews so a later
+          #   kickoff can call the model; provisioning itself doesn't need it.
           CREWAI_TOKEN: ${{ secrets.CREWAI_TOKEN }}
           SHOWCASE_ORG: ${{ secrets.SHOWCASE_ORG }}
-        run: |
-          set -euo pipefail
-
-          if [ ! -f state.json ]; then
-            echo "No state.json found — nothing to do."
-            exit 0
-          fi
-
-          # Secret gate: never fire metered AMP calls without credentials. If the
-          # repo secrets aren't configured, no-op cleanly (the console still works
-          # as a read-only status view; actions just won't execute).
-          if [ -z "${CREWAI_TOKEN:-}" ] || [ -z "${SHOWCASE_ORG:-}" ]; then
-            echo "CREWAI_TOKEN / SHOWCASE_ORG not set — skipping execution (no-op)."
-            echo "Configure them under Settings → Secrets and variables → Actions to enable."
-            exit 0
-          fi
-
-          # Timestamp helper (ISO-8601, matches what the console writes).
-          NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-
-          # Iterate pending commands. jq drives the loop; each iteration shells
-          # out to the (stubbed) AMP action, then patches state.json in place.
-          PENDING_IDS="$(jq -r '.commands[] | select(.state == "pending") | .id' state.json)"
-
-          if [ -z "$PENDING_IDS" ]; then
-            echo "No pending commands."
-            exit 0
-          fi
-
-          for ID in $PENDING_IDS; do
-            ACTION="$(jq -r --arg id "$ID" '.commands[] | select(.id == $id) | .action' state.json)"
-            SCENARIO="$(jq -r --arg id "$ID" '.commands[] | select(.id == $id) | (.scenario // "ALL")' state.json)"
-            echo "== Executing command $ID: action=$ACTION scenario=$SCENARIO =="
-
-            NEW_CMD_STATE="done"
-            NEW_DEPLOY_STATUS=""
-
-            case "$ACTION" in
-              # CANONICAL IMPLEMENTATION: the amp-showcase repo already ships tested
-              # ops for all three actions — prefer running those over hand-rolled
-              # curls. In this step, clone amp-showcase, `pip install -e .`, and run:
-              #   python -m scripts.provision --org "$SHOWCASE_ORG"
-              #   python -m scripts.reset     --org "$SHOWCASE_ORG" --scenario "<sector>/<slug>"
-              #   python -m scripts.teardown  --org "$SHOWCASE_ORG" [--scenario ...]
-              # They resolve the token via CREWAI_PLATFORM_INTEGRATION_TOKEN (set
-              # CREWAI_TOKEN into it) and use the confirmed control-plane endpoints below.
-              # The confirmed live API (base https://app.crewai.com):
-              #   POST   /crewai_plus/api/v1/crews         {deploy:{name,repo_clone_url,env}}
-              #   GET    /crewai_plus/api/v1/crews                       list (find showcase_* by name)
-              #   GET    /crewai_plus/api/v1/crews/{uuid}/status         -> {public_url, token, status}
-              #   DELETE /crewai_plus/api/v1/crews/{uuid}                teardown
-              #   POST   {public_url}/kickoff  ->  {kickoff_id};  GET {public_url}/status/{kickoff_id}
-              # Header: Authorization: Bearer $CREWAI_TOKEN  +  X-Crewai-Organization-Id: $SHOWCASE_ORG
-              provision)
-                # TODO(AMP): run `python -m scripts.provision --org "$SHOWCASE_ORG"`
-                # (or, per-scenario, POST /crews with repo_clone_url of the public
-                # per-scenario repo amp-showcase-<sector>-<slug>, name showcase_<sector>_<slug>).
-                echo "WOULD provision scenario=$SCENARIO in org=$SHOWCASE_ORG"
-                NEW_DEPLOY_STATUS="Online"
-                ;;
-              reset)
-                # TODO(AMP): run `python -m scripts.reset --org "$SHOWCASE_ORG" --scenario "$SCENARIO"`
-                # (teardown-by-prefix + verify-zero + redeploy — the tested path).
-                echo "WOULD reset (teardown-by-prefix + redeploy) scenario=$SCENARIO"
-                NEW_DEPLOY_STATUS="Online"
-                ;;
-              teardown)
-                # TODO(AMP): run `python -m scripts.teardown --org "$SHOWCASE_ORG" [--scenario "$SCENARIO"]`
-                # (DELETE every showcase_<sector>_<slug>, verify zero remain).
-                echo "WOULD teardown scenario=$SCENARIO"
-                NEW_DEPLOY_STATUS="Not deployed"
-                ;;
-              *)
-                echo "Unknown action '$ACTION' — marking command as error."
-                NEW_CMD_STATE="error"
-                ;;
-            esac
-
-            # --- Patch state.json for this command ---------------------------------
-            # 1) Mark the command done/error.
-            # 2) If the action succeeded, update the matching deployment status
-            #    (scenario "ALL" touches every deployment).
-            jq \
-              --arg id "$ID" \
-              --arg cmdstate "$NEW_CMD_STATE" \
-              --arg scenario "$SCENARIO" \
-              --arg status "$NEW_DEPLOY_STATUS" \
-              --arg now "$NOW" '
-              .commands = (.commands | map(
-                if .id == $id then .state = $cmdstate else . end
-              ))
-              | (if $status != "" then
-                  .deployments = (.deployments | map(
-                    if ($scenario == "ALL") or ((.sector + "/" + .slug) == $scenario)
-                    then .status = $status | .updated_at = $now
-                    else . end
-                  ))
-                else . end)
-              | .updated_at = $now
-            ' state.json > state.json.tmp
-            mv state.json.tmp state.json
-          done
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Owner of the public per-scenario deploy repos (amp-showcase-<sector>-<slug>).
+          # Optional repo *variable*; defaults to the central owner inside the script.
+          SHOWCASE_DEPLOY_OWNER: ${{ vars.SHOWCASE_DEPLOY_OWNER }}
+        run: bash amp-executor.sh
 
       - name: Commit results
         run: |

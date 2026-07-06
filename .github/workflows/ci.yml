@@ -51,6 +51,18 @@ jobs:
       - name: WASM unit tests (Node)
         run: wasm-pack test --node --lib
 
+  executor-tests:
+    name: Executor (shellcheck + offline drain tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck the executor
+        run: shellcheck amp-executor.sh
+
+      - name: Offline executor tests (mock AMP control plane)
+        run: python3 tests/executor/test_executor.py
+
 # TODO(e2e): a Playwright tier that drives the built app in a real browser —
 # setup screen -> enter token/repo/org -> dashboard renders -> click Reset ->
 # a pending command appears in state.json — mirroring crewai-field-labs' e2e
