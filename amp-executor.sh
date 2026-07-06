@@ -223,7 +223,9 @@ do_kickoff() { # sector slug -> 0 on a SUCCESS run, 1 otherwise
   amp_curl GET "crews/$uuid/status"
   [ "${AMP_HTTP:-}" = 200 ] || { log "kickoff: status lookup failed (HTTP ${AMP_HTTP:-none})"; return 1; }
   local pub ctok; pub="$(jq -r '.public_url // ""' "$AMP_BODY")"; ctok="$(jq -r '.token // ""' "$AMP_BODY")"
-  [ -n "$pub" ] && [ -n "$ctok" ] || { log "kickoff: no public_url/token for $name yet"; RUN_RESULT="not online"; return 1; }
+  if [ -z "$pub" ] || [ -z "$ctok" ]; then
+    log "kickoff: no public_url/token for $name yet"; RUN_RESULT="not online"; return 1
+  fi
 
   pub_curl POST "${pub%/}/kickoff" "$ctok" '{"inputs":{}}'
   case "${AMP_HTTP:-}" in
