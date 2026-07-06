@@ -1,0 +1,143 @@
+name: execute-commands
+
+# Executor for the amp-showcase console.
+#
+# The browser console never calls the AMP API directly (CORS + secret safety).
+# Instead it enqueues Command objects into state.json (state="pending"). This
+# workflow drains that queue: for each pending command it runs the matching AMP
+# action, then writes results back into state.json (deployment status + command
+# state="done"), and commits the file.
+#
+# Runs on a ~5 min schedule and on manual dispatch. Concurrency guard prevents
+# two runs from racing on state.json.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: execute-commands
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout state repo
+        uses: actions/checkout@v4
+
+      - name: Drain pending commands
+        env:
+          # Configure these as repo secrets (Settings → Secrets and variables → Actions).
+          CREWAI_TOKEN: ${{ secrets.CREWAI_TOKEN }}
+          SHOWCASE_ORG: ${{ secrets.SHOWCASE_ORG }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f state.json ]; then
+            echo "No state.json found — nothing to do."
+            exit 0
+          fi
+
+          # Timestamp helper (ISO-8601, matches what the console writes).
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+
+          # Iterate pending commands. jq drives the loop; each iteration shells
+          # out to the (stubbed) AMP action, then patches state.json in place.
+          PENDING_IDS="$(jq -r '.commands[] | select(.state == "pending") | .id' state.json)"
+
+          if [ -z "$PENDING_IDS" ]; then
+            echo "No pending commands."
+            exit 0
+          fi
+
+          for ID in $PENDING_IDS; do
+            ACTION="$(jq -r --arg id "$ID" '.commands[] | select(.id == $id) | .action' state.json)"
+            SCENARIO="$(jq -r --arg id "$ID" '.commands[] | select(.id == $id) | (.scenario // "ALL")' state.json)"
+            echo "== Executing command $ID: action=$ACTION scenario=$SCENARIO =="
+
+            NEW_CMD_STATE="done"
+            NEW_DEPLOY_STATUS=""
+
+            case "$ACTION" in
+              provision)
+                # ------------------------------------------------------------------
+                # TODO(AMP): provision showcase environment(s).
+                #   For each target scenario "<sector>/<slug>":
+                #     name="showcase_${sector}_${slug}"
+                #     curl -sSf -X POST "https://api.crewai.com/v1/orgs/${SHOWCASE_ORG}/deployments" \
+                #          -H "Authorization: Bearer ${CREWAI_TOKEN}" \
+                #          -H "Content-Type: application/json" \
+                #          -d "{\"name\":\"${name}\",\"scenario\":\"<sector>/<slug>\"}"
+                #   On success capture the returned public_url and set status "Online".
+                # ------------------------------------------------------------------
+                echo "WOULD provision scenario=$SCENARIO in org=$SHOWCASE_ORG"
+                NEW_DEPLOY_STATUS="Online"
+                ;;
+              reset)
+                # ------------------------------------------------------------------
+                # TODO(AMP): reset = teardown-by-prefix then redeploy.
+                #   1) List deployments whose name starts with showcase_<sector>_<slug>
+                #      (or showcase_ for "ALL") and DELETE each:
+                #        curl -sSf -X DELETE ".../deployments/${id}" -H "Authorization: Bearer ${CREWAI_TOKEN}"
+                #   2) Re-create them (see provision above).
+                # ------------------------------------------------------------------
+                echo "WOULD reset (teardown-by-prefix + redeploy) scenario=$SCENARIO"
+                NEW_DEPLOY_STATUS="Online"
+                ;;
+              teardown)
+                # ------------------------------------------------------------------
+                # TODO(AMP): teardown by name prefix.
+                #   Delete every deployment named showcase_<sector>_<slug>
+                #   (or all showcase_* when scenario is ALL).
+                # ------------------------------------------------------------------
+                echo "WOULD teardown scenario=$SCENARIO"
+                NEW_DEPLOY_STATUS="Not deployed"
+                ;;
+              *)
+                echo "Unknown action '$ACTION' — marking command as error."
+                NEW_CMD_STATE="error"
+                ;;
+            esac
+
+            # --- Patch state.json for this command ---------------------------------
+            # 1) Mark the command done/error.
+            # 2) If the action succeeded, update the matching deployment status
+            #    (scenario "ALL" touches every deployment).
+            jq \
+              --arg id "$ID" \
+              --arg cmdstate "$NEW_CMD_STATE" \
+              --arg scenario "$SCENARIO" \
+              --arg status "$NEW_DEPLOY_STATUS" \
+              --arg now "$NOW" '
+              .commands = (.commands | map(
+                if .id == $id then .state = $cmdstate else . end
+              ))
+              | (if $status != "" then
+                  .deployments = (.deployments | map(
+                    if ($scenario == "ALL") or ((.sector + "/" + .slug) == $scenario)
+                    then .status = $status | .updated_at = $now
+                    else . end
+                  ))
+                else . end)
+              | .updated_at = $now
+            ' state.json > state.json.tmp
+            mv state.json.tmp state.json
+          done
+
+      - name: Commit results
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- state.json; then
+            echo "No changes to state.json."
+            exit 0
+          fi
+          git config user.name  "amp-showcase-executor"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          git commit -m "executor: drain pending commands ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push

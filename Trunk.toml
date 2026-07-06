@@ -1,0 +1,11 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+ignore = ["dist", ".git"]
+
+[serve]
+port = 8082
+open = false
+addresses = ["127.0.0.1"]
