@@ -43,6 +43,15 @@ jobs:
             exit 0
           fi
 
+          # Secret gate: never fire metered AMP calls without credentials. If the
+          # repo secrets aren't configured, no-op cleanly (the console still works
+          # as a read-only status view; actions just won't execute).
+          if [ -z "${CREWAI_TOKEN:-}" ] || [ -z "${SHOWCASE_ORG:-}" ]; then
+            echo "CREWAI_TOKEN / SHOWCASE_ORG not set — skipping execution (no-op)."
+            echo "Configure them under Settings → Secrets and variables → Actions to enable."
+            exit 0
+          fi
+
           # Timestamp helper (ISO-8601, matches what the console writes).
           NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 
@@ -64,37 +73,37 @@ jobs:
             NEW_DEPLOY_STATUS=""
 
             case "$ACTION" in
+              # CANONICAL IMPLEMENTATION: the amp-showcase repo already ships tested
+              # ops for all three actions — prefer running those over hand-rolled
+              # curls. In this step, clone amp-showcase, `pip install -e .`, and run:
+              #   python -m scripts.provision --org "$SHOWCASE_ORG"
+              #   python -m scripts.reset     --org "$SHOWCASE_ORG" --scenario "<sector>/<slug>"
+              #   python -m scripts.teardown  --org "$SHOWCASE_ORG" [--scenario ...]
+              # They resolve the token via CREWAI_PLATFORM_INTEGRATION_TOKEN (set
+              # CREWAI_TOKEN into it) and use the confirmed control-plane endpoints below.
+              # The confirmed live API (base https://app.crewai.com):
+              #   POST   /crewai_plus/api/v1/crews         {deploy:{name,repo_clone_url,env}}
+              #   GET    /crewai_plus/api/v1/crews                       list (find showcase_* by name)
+              #   GET    /crewai_plus/api/v1/crews/{uuid}/status         -> {public_url, token, status}
+              #   DELETE /crewai_plus/api/v1/crews/{uuid}                teardown
+              #   POST   {public_url}/kickoff  ->  {kickoff_id};  GET {public_url}/status/{kickoff_id}
+              # Header: Authorization: Bearer $CREWAI_TOKEN  +  X-Crewai-Organization-Id: $SHOWCASE_ORG
               provision)
-                # ------------------------------------------------------------------
-                # TODO(AMP): provision showcase environment(s).
-                #   For each target scenario "<sector>/<slug>":
-                #     name="showcase_${sector}_${slug}"
-                #     curl -sSf -X POST "https://api.crewai.com/v1/orgs/${SHOWCASE_ORG}/deployments" \
-                #          -H "Authorization: Bearer ${CREWAI_TOKEN}" \
-                #          -H "Content-Type: application/json" \
-                #          -d "{\"name\":\"${name}\",\"scenario\":\"<sector>/<slug>\"}"
-                #   On success capture the returned public_url and set status "Online".
-                # ------------------------------------------------------------------
+                # TODO(AMP): run `python -m scripts.provision --org "$SHOWCASE_ORG"`
+                # (or, per-scenario, POST /crews with repo_clone_url of the public
+                # per-scenario repo amp-showcase-<sector>-<slug>, name showcase_<sector>_<slug>).
                 echo "WOULD provision scenario=$SCENARIO in org=$SHOWCASE_ORG"
                 NEW_DEPLOY_STATUS="Online"
                 ;;
               reset)
-                # ------------------------------------------------------------------
-                # TODO(AMP): reset = teardown-by-prefix then redeploy.
-                #   1) List deployments whose name starts with showcase_<sector>_<slug>
-                #      (or showcase_ for "ALL") and DELETE each:
-                #        curl -sSf -X DELETE ".../deployments/${id}" -H "Authorization: Bearer ${CREWAI_TOKEN}"
-                #   2) Re-create them (see provision above).
-                # ------------------------------------------------------------------
+                # TODO(AMP): run `python -m scripts.reset --org "$SHOWCASE_ORG" --scenario "$SCENARIO"`
+                # (teardown-by-prefix + verify-zero + redeploy — the tested path).
                 echo "WOULD reset (teardown-by-prefix + redeploy) scenario=$SCENARIO"
                 NEW_DEPLOY_STATUS="Online"
                 ;;
               teardown)
-                # ------------------------------------------------------------------
-                # TODO(AMP): teardown by name prefix.
-                #   Delete every deployment named showcase_<sector>_<slug>
-                #   (or all showcase_* when scenario is ALL).
-                # ------------------------------------------------------------------
+                # TODO(AMP): run `python -m scripts.teardown --org "$SHOWCASE_ORG" [--scenario "$SCENARIO"]`
+                # (DELETE every showcase_<sector>_<slug>, verify zero remain).
                 echo "WOULD teardown scenario=$SCENARIO"
                 NEW_DEPLOY_STATUS="Not deployed"
                 ;;
