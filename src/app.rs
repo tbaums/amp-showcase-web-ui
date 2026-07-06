@@ -332,6 +332,7 @@ fn SetupView() -> impl IntoView {
                     <span class="wm-crew">"crewai"</span>
                     <span class="wm-sep">"/"</span>
                     <span class="wm-app">"amp-showcase web UI"</span>
+                    <span class="wm-ver" title="build version">{format!("v{}", crate::VERSION)}</span>
                 </div>
             </header>
 
@@ -465,6 +466,7 @@ fn DashboardView() -> impl IntoView {
                     <span class="wm-crew">"crewai"</span>
                     <span class="wm-sep">"/"</span>
                     <span class="wm-app">"amp-showcase web UI"</span>
+                    <span class="wm-ver" title="build version">{format!("v{}", crate::VERSION)}</span>
                 </div>
                 <button class="btn btn-ghost btn-sm" on:click=move |_| state.navigate(View::Setup)>
                     "Setup"
