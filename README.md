@@ -134,6 +134,26 @@ trunk build --release
 All CSS is inlined in `index.html` (dark + monospace, CrewAI coral accent), and
 the app makes no external font/CDN requests (CSP-safe).
 
+## Tests
+
+`.github/workflows/ci.yml` runs on every push/PR: clippy against the wasm
+target, then the unit suite via the Node wasm runner (these tests are
+DOM-free). Locally:
+
+```bash
+cargo install wasm-pack
+wasm-pack test --node --lib
+```
+
+Coverage is the load-bearing, backend-touching logic: the `state.json` schema
+(serde round-trips + forward-compatible defaults + an executor-written result
+document), `sync`'s GitHub Contents-API contract (config defaults, URL/auth
+shape, the base64 wire round-trip), and `apply_command`'s optimistic
+state-transitions (targeted vs all-scenario, each action's status nudge,
+unknown-action safety). A browser-driven Playwright tier (drive the setup
+screen → dashboard → queue a command) is the next step — see the TODO in
+`ci.yml`.
+
 ---
 
 ## Project layout

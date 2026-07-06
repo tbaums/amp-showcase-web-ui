@@ -206,3 +206,75 @@ pub async fn push_state(
         .map_err(|e| SyncError::Decode(e.to_string()))?;
     Ok(parsed.content.sha)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use wasm_bindgen_test::*;
+
+    fn cfg(token: &str, repo: &str) -> SyncConfig {
+        SyncConfig {
+            token: token.into(),
+            repo: repo.into(),
+            branch: String::new(),
+            path: String::new(),
+            org_id: "org-1".into(),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn is_configured_requires_both_token_and_repo() {
+        assert!(!cfg("", "").is_configured());
+        assert!(!cfg("tok", "").is_configured());
+        assert!(!cfg("", "owner/repo").is_configured());
+        assert!(cfg("tok", "owner/repo").is_configured());
+    }
+
+    #[wasm_bindgen_test]
+    fn github_config_defaults_branch_and_path() {
+        let gh = cfg("tok", "owner/state").to_github_config();
+        assert_eq!(gh.branch, "main");
+        assert_eq!(gh.path, "state.json");
+    }
+
+    #[wasm_bindgen_test]
+    fn github_config_respects_explicit_branch_and_path() {
+        let mut c = cfg("tok", "owner/state");
+        c.branch = "prod".into();
+        c.path = "envs/demo.json".into();
+        let gh = c.to_github_config();
+        assert_eq!(gh.branch, "prod");
+        assert_eq!(gh.path, "envs/demo.json");
+    }
+
+    #[wasm_bindgen_test]
+    fn contents_url_and_auth_header_match_the_github_contract() {
+        let gh = cfg("secret-token", "tbaums/my-state").to_github_config();
+        assert_eq!(
+            contents_url(&gh),
+            "https://api.github.com/repos/tbaums/my-state/contents/state.json"
+        );
+        assert_eq!(auth_header(&gh), "Bearer secret-token");
+    }
+
+    #[wasm_bindgen_test]
+    fn state_survives_the_base64_wire_round_trip() {
+        // fetch_state base64-decodes the Contents API payload (which GitHub
+        // wraps at 60 cols); push_state base64-encodes it. Prove a state
+        // survives encode -> whitespace-wrap -> decode -> parse intact.
+        let state = ConsoleState::initial("org-xyz");
+        let encoded = B64.encode(serde_json::to_string(&state).unwrap());
+        let wrapped = encoded
+            .as_bytes()
+            .chunks(60)
+            .map(|c| String::from_utf8(c.to_vec()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cleaned: String = wrapped.chars().filter(|c| !c.is_whitespace()).collect();
+        let bytes = B64.decode(&cleaned).unwrap();
+        let back: ConsoleState = serde_json::from_str(&String::from_utf8(bytes).unwrap()).unwrap();
+        assert_eq!(back.org_id, "org-xyz");
+    }
+}

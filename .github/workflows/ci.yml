@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Clippy + WASM unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+            ${{ runner.os }}-cargo-
+
+      # Clippy against the wasm target (the only one the lib ships against),
+      # errors on real correctness lints without treating every style warning
+      # as fatal.
+      - name: Clippy
+        run: cargo clippy --lib --target wasm32-unknown-unknown --tests
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      # The unit tests (models / sync / apply_command) are DOM-free, so they
+      # run under the Node wasm runner — no browser install needed. A future
+      # Playwright tier (see below) will drive the actual UI in a real browser.
+      - name: WASM unit tests (Node)
+        run: wasm-pack test --node --lib
+
+# TODO(e2e): a Playwright tier that drives the built app in a real browser —
+# setup screen -> enter token/repo/org -> dashboard renders -> click Reset ->
+# a pending command appears in state.json — mirroring crewai-field-labs' e2e
+# job. Deferred: it needs a mock (or throwaway) GitHub repo + PAT in CI to
+# exercise the live Contents-API round-trip end to end.

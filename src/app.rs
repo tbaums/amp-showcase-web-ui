@@ -672,3 +672,67 @@ fn deployment_row(state: AppState, d: Deployment) -> impl IntoView {
         </tr>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::apply_command;
+    use crate::models::{Command, ConsoleState, Deployment};
+    use wasm_bindgen_test::*;
+
+    fn dep(sector: &str, slug: &str, status: &str) -> Deployment {
+        Deployment {
+            sector: sector.into(),
+            slug: slug.into(),
+            name: format!("showcase_{}_{}", sector.replace('-', "_"), slug.replace('-', "_")),
+            status: status.into(),
+            public_url: None,
+            updated_at: None,
+        }
+    }
+
+    fn cmd(action: &str, scenario: Option<&str>) -> Command {
+        Command {
+            id: "id-1".into(),
+            action: action.into(),
+            scenario: scenario.map(str::to_string),
+            requested_at: "2026-07-06T00:00:00Z".into(),
+            state: "pending".into(),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn reset_nudges_only_the_targeted_scenario_to_provisioning() {
+        let mut cs = ConsoleState::initial("org");
+        cs.deployments = vec![dep("pharma", "payload", "Online"), dep("pharma", "test-drive", "Online")];
+        apply_command(&mut cs, &cmd("reset", Some("pharma/payload")));
+        assert_eq!(cs.deployments[0].status, "Provisioning"); // targeted
+        assert_eq!(cs.deployments[1].status, "Online"); // untouched
+        assert_eq!(cs.commands.len(), 1);
+        assert_eq!(cs.commands[0].action, "reset");
+    }
+
+    #[wasm_bindgen_test]
+    fn teardown_marks_targeted_not_deployed() {
+        let mut cs = ConsoleState::initial("org");
+        cs.deployments = vec![dep("pharma", "payload", "Online")];
+        apply_command(&mut cs, &cmd("teardown", Some("pharma/payload")));
+        assert_eq!(cs.deployments[0].status, "Not deployed");
+    }
+
+    #[wasm_bindgen_test]
+    fn a_null_scenario_applies_to_every_deployment() {
+        let mut cs = ConsoleState::initial("org");
+        cs.deployments = vec![dep("pharma", "payload", "Online"), dep("finserv", "test-drive", "Failed")];
+        apply_command(&mut cs, &cmd("provision", None));
+        assert!(cs.deployments.iter().all(|d| d.status == "Provisioning"));
+    }
+
+    #[wasm_bindgen_test]
+    fn an_unknown_action_appends_the_command_but_touches_no_status() {
+        let mut cs = ConsoleState::initial("org");
+        cs.deployments = vec![dep("pharma", "payload", "Online")];
+        apply_command(&mut cs, &cmd("frobnicate", Some("pharma/payload")));
+        assert_eq!(cs.deployments[0].status, "Online"); // unchanged
+        assert_eq!(cs.commands.len(), 1); // still queued
+    }
+}
