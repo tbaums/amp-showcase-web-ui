@@ -195,6 +195,20 @@ def test_secret_gate_noops_without_token():
     print("ok: secret gate -> no-op, command still pending")
 
 
+def test_commit_step_is_push_resilient():
+    # Regression for run 28843654726: the Commit step git-pushed state.json with
+    # no fetch/rebase/retry, so an interleaved write (console enqueue / overlapping
+    # run) non-fast-forward-rejected the push and failed the whole run. Guard that
+    # the resilience (integrate remote + retry) and the serialization guard stay.
+    wf = (REPO / ".github/workflows/execute-commands.yml").read_text()
+    assert "git fetch origin main" in wf, "commit step must fetch remote before pushing"
+    assert "git rebase origin/main" in wf, "commit step must rebase onto remote"
+    assert "for attempt in" in wf, "commit step must retry the push on rejection"
+    assert "group: execute-commands" in wf, "concurrency group must serialize runs"
+    assert "cancel-in-progress: false" in wf, "must queue (not cancel) mid-provision runs"
+    print("ok: commit step is push-resilient (fetch+rebase+retry) + serialized")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

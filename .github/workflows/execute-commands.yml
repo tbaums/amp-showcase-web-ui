@@ -27,6 +27,12 @@ permissions:
   contents: write
 
 concurrency:
+  # Serialize executor runs against each other (queue, don't cancel — cancelling
+  # a mid-provision run would abandon in-flight AMP deploys and skip the
+  # write-back). NOTE: this only serializes *workflow runs*; it cannot serialize
+  # the browser console's Contents-API writes to state.json (those aren't runs),
+  # so the "Commit results" step below still fetch+rebase+retries to survive an
+  # interleaved write. Both guards are needed.
   group: execute-commands
   cancel-in-progress: false
 
@@ -63,4 +69,29 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add state.json
           git commit -m "executor: drain pending commands ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          git push
+
+          # A concurrent write to state.json — the browser console enqueuing a
+          # command, or an overlapping run — can move the remote ahead while we
+          # were provisioning (a run takes minutes), so a bare push bounces with
+          # a non-fast-forward rejection and fails the whole run. Integrate the
+          # remote first, then push; retry to cover a fresh race between the
+          # fetch and the push. state.json changes are appends (new commands) +
+          # fields the executor owns, so a rebase merges the common case cleanly;
+          # a genuine same-line conflict aborts loudly so the next run reconciles
+          # (rather than silently clobbering a queued command).
+          pushed=""
+          for attempt in $(seq 1 5); do
+            if git push origin HEAD:main; then
+              echo "push succeeded (attempt $attempt)"; pushed=1; break
+            fi
+            echo "push rejected (attempt $attempt) — integrating remote and retrying"
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "::error::state.json rebase conflict (a concurrent write touched the same lines) — aborting; the next run will reconcile."
+              exit 1
+            fi
+          done
+          if [ -z "$pushed" ]; then
+            echo "::error::push still rejected after 5 attempts"; exit 1
+          fi
